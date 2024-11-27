@@ -6,7 +6,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
+ 
 const shopifyDomain = process.env.SHOPIFY_DOMAIN;
 const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
 
