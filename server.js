@@ -57,8 +57,8 @@ app.post('/webhooks/customers/create', async (req, res) => {
       console.error('Error updating metafield:', error);
       res.status(500).send('Internal server error');
     }
-  });
-  
+  }); 
+   
   // Inicia el servidor
   app.listen(3000, () => {
     console.log('Server running on port 3000');
