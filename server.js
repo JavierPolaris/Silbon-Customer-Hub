@@ -5,16 +5,47 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
- 
+const PORT = process.env.PORT || 5000;
+
 const shopifyDomain = process.env.SHOPIFY_DOMAIN;
 const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
 
+// Middleware para manejar JSON
+app.use(express.json());
+
 // Ruta para manejar el webhook
 app.post('/webhooks/customers/create', async (req, res) => {
-    const customerId = req.body.id;
-  
-    const query = `
+  const customerId = req.body.id;
+
+  // Consulta para obtener el valor de marketingState
+  const queryGetMarketingState = `
+    query {
+      customer(id: "gid://shopify/Customer/${customerId}") {
+        emailMarketingConsent {
+          marketingState
+        }
+      }
+    }
+  `;
+
+  try {
+    // Realiza la solicitud para obtener el marketingState
+    const responseGet = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({ query: queryGetMarketingState }),
+    });
+
+    const dataGet = await responseGet.json();
+    const marketingState = dataGet.data.customer.emailMarketingConsent.marketingState;
+
+    console.log(`Marketing State obtenido: ${marketingState}`);
+
+    // Consulta para actualizar el metafield con el marketingState
+    const queryUpdateMetafield = `
       mutation {
         customerUpdate(
           input: {
@@ -23,7 +54,7 @@ app.post('/webhooks/customers/create', async (req, res) => {
               {
                 namespace: "custom"
                 key: "marketing_state"
-                value: "SUBSCRIBED"
+                value: "${marketingState}"
                 type: "single_line_text_field"
               }
             ]
@@ -39,31 +70,28 @@ app.post('/webhooks/customers/create', async (req, res) => {
         }
       }
     `;
-  
-    try {
-      const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-10/graphql.json`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-        },
-        body: JSON.stringify({ query }),
-      });
-  
-      const data = await response.json();
-      console.log('Metafield updated:', data);
-      res.status(200).send('Webhook processed');
-    } catch (error) {
-      console.error('Error updating metafield:', error);
-      res.status(500).send('Internal server error');
-    }
-  }); 
-   
-  // Inicia el servidor
-  app.listen(3000, () => {
-    console.log('Server running on port 3000');
-  });  
 
+    // Realiza la solicitud para actualizar el metafield
+    const responseUpdate = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({ query: queryUpdateMetafield }),
+    });
+
+    const dataUpdate = await responseUpdate.json();
+    console.log('Metafield actualizado:', dataUpdate);
+
+    res.status(200).send('Webhook processed and metafield updated');
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).send('Internal server error');
+  }
+});
+
+// Inicia el servidor
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
