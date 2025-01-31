@@ -1,7 +1,7 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
-import { processAllCustomers } from './updateExistingCustomers.js'; // Importa tu código existente
+import { processAllCustomers, addFavoriteToCustomer, getCustomerFavorites } from './updateExistingCustomers.js';
 
 dotenv.config();
 

@@ -125,7 +125,7 @@ const processCustomer = async (customer) => {
   
 
 // Función para recorrer todos los clientes
-const processAllCustomers = async () => {
+export const processAllCustomers = async () => {
   let cursor = null;
 
   do {
@@ -186,7 +186,7 @@ const processAllCustomers = async () => {
 
 
 // Guardar un producto en el metafield `favorites`
-const addFavoriteToCustomer = async (customerId, favorite) => {
+export const addFavoriteToCustomer = async (customerId, favorite) => {
   const queryGetFavorites = `
     query {
       customer(id: "gid://shopify/Customer/${customerId}") {
@@ -276,7 +276,7 @@ const addFavoriteToCustomer = async (customerId, favorite) => {
 };
 
 // Leer los favoritos del cliente
-const getCustomerFavorites = async (customerId) => {
+export const getCustomerFavorites = async (customerId) => {
   const queryGetFavorites = `
     query {
       customer(id: "gid://shopify/Customer/${customerId}") {
