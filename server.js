@@ -2,6 +2,8 @@ import express from 'express';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { processAllCustomers, addFavoriteToCustomer, getCustomerFavorites } from './updateExistingCustomers.js';
+import processAllCustomers from './updateExistingCustomers.js';
+
 
 dotenv.config();
 
