@@ -1,6 +1,7 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import { processAllCustomers } from './updateExistingCustomers.js'; // Importa tu código existente
 
 dotenv.config();
 
@@ -13,11 +14,60 @@ const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
 // Middleware para manejar JSON
 app.use(express.json());
 
+// Función para registrar el webhook
+const registerWebhook = async () => {
+  const webhookEndpoint = `https://${process.env.VERCEL_URL || 'your-vercel-app.vercel.app'}/webhooks/customers/create`;
+
+  const query = `
+    mutation {
+      webhookSubscriptionCreate(
+        topic: CUSTOMERS_CREATE,
+        webhookSubscription: {
+          format: JSON,
+          callbackUrl: "${webhookEndpoint}"
+        }
+      ) {
+        userErrors {
+          field
+          message
+        }
+        webhookSubscription {
+          id
+        }
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': accessToken,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const data = await response.json();
+    console.log('Webhook registration response:', data);
+
+    if (data.errors || data.data.webhookSubscriptionCreate.userErrors.length) {
+      console.error('Error registering webhook:', data);
+    } else {
+      console.log('Webhook registered successfully:', data.data.webhookSubscriptionCreate.webhookSubscription.id);
+    }
+  } catch (error) {
+    console.error('Error registering webhook:', error);
+  }
+};
+
+// Llama a la función para registrar el webhook
+registerWebhook();
+
 // Ruta para manejar el webhook
 app.post('/webhooks/customers/create', async (req, res) => {
   const customerId = req.body.id;
 
-  // Consulta para obtener el valor de marketingState
   const queryGetMarketingState = `
     query {
       customer(id: "gid://shopify/Customer/${customerId}") {
@@ -29,7 +79,6 @@ app.post('/webhooks/customers/create', async (req, res) => {
   `;
 
   try {
-    // Realiza la solicitud para obtener el marketingState
     const responseGet = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
       method: 'POST',
       headers: {
@@ -44,7 +93,6 @@ app.post('/webhooks/customers/create', async (req, res) => {
 
     console.log(`Marketing State obtenido: ${marketingState}`);
 
-    // Consulta para actualizar el metafield con el marketingState
     const queryUpdateMetafield = `
       mutation {
         customerUpdate(
@@ -71,7 +119,6 @@ app.post('/webhooks/customers/create', async (req, res) => {
       }
     `;
 
-    // Realiza la solicitud para actualizar el metafield
     const responseUpdate = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
       method: 'POST',
       headers: {
@@ -90,6 +137,42 @@ app.post('/webhooks/customers/create', async (req, res) => {
     res.status(500).send('Internal server error');
   }
 });
+
+// Ruta para añadir un producto a favoritos
+app.post('/favorites/add', async (req, res) => {
+  const { customerId, productId, variantId, productUrl } = req.body;
+
+  if (!customerId || !productId || !variantId || !productUrl) {
+    return res.status(400).json({ error: 'Faltan datos requeridos.' });
+  }
+
+  const favorite = { productId, variantId, productUrl };
+  try {
+    await addFavoriteToCustomer(customerId, favorite);
+    res.status(200).json({ message: 'Producto añadido a favoritos.' });
+  } catch (error) {
+    console.error('Error añadiendo producto a favoritos:', error);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
+// Ruta para obtener los favoritos del cliente
+app.get('/favorites', async (req, res) => {
+  const { customerId } = req.query;
+
+  if (!customerId) {
+    return res.status(400).json({ error: 'Faltan datos requeridos.' });
+  }
+
+  try {
+    const favorites = await getCustomerFavorites(customerId);
+    res.status(200).json({ favorites });
+  } catch (error) {
+    console.error('Error obteniendo favoritos del cliente:', error);
+    res.status(500).json({ error: 'Error interno del servidor.' });
+  }
+});
+
 
 // Inicia el servidor
 app.listen(PORT, () => {
