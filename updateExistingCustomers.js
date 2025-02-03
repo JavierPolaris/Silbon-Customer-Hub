@@ -28,100 +28,50 @@ const fetchWithRetry = async (url, options, retries = 3) => {
 
 // Ajusta cómo se procesa el customerId para evitar duplicados
 const processCustomer = async (customer) => {
-    // Verifica si el ID ya tiene el prefijo 'gid://shopify/Customer/'
-    const customerId = customer.id.startsWith('gid://shopify/Customer/')
-      ? customer.id
-      : `gid://shopify/Customer/${customer.id}`;
-  
-    const queryGetMarketingState = `
-      query {
-        customer(id: "${customerId}") {
-          emailMarketingConsent {
-            marketingState
-          }
+  // Elimina la lógica redundante que agrega el prefijo de nuevo
+  const customerId = customer.id;
+
+  const queryGetMarketingState = `
+    query {
+      customer(id: "${customerId}") {
+        emailMarketingConsent {
+          marketingState
         }
       }
-    `;
-  
-    try {
-      const responseGet = await fetchWithRetry(
-        `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': accessToken,
-          },
-          body: JSON.stringify({ query: queryGetMarketingState }),
-        }
-      );
-  
-      const dataGet = await responseGet.json();
-  
-      if (!dataGet.data || !dataGet.data.customer) {
-        console.error(`No se pudo obtener datos del cliente con ID: ${customerId}`);
-        console.error('Respuesta completa:', dataGet);
-        return;
-      }
-  
-      const marketingState =
-        dataGet.data.customer.emailMarketingConsent?.marketingState;
-  
-      console.log(`Marketing State obtenido para ${customer.email}: ${marketingState}`);
-  
-      if (!marketingState) {
-        console.warn(`El cliente ${customer.email} no tiene un estado de marketing definido.`);
-        return;
-      }
-  
-      const queryUpdateMetafield = `
-        mutation {
-          customerUpdate(
-            input: {
-              id: "${customerId}"
-              metafields: [
-                {
-                  namespace: "custom"
-                  key: "marketing_state"
-                  value: "${marketingState}"
-                  type: "single_line_text_field"
-                }
-              ]
-            }
-          ) {
-            customer {
-              id
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-  
-      const responseUpdate = await fetchWithRetry(
-        `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': accessToken,
-          },
-          body: JSON.stringify({ query: queryUpdateMetafield }),
-        }
-      );
-  
-      const dataUpdate = await responseUpdate.json();
-      if (dataUpdate.data.customerUpdate.userErrors.length) {
-        console.error('Errores al actualizar el metafield:', dataUpdate.data.customerUpdate.userErrors);
-      } else {
-        console.log(`Metafield actualizado para ${customer.email}`);
-      }
-    } catch (error) {
-      console.error(`Error procesando cliente ${customer.email}:`, error);
     }
-  };
+  `;
+
+  try {
+    const responseGet = await fetchWithRetry(
+      `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': accessToken,
+        },
+        body: JSON.stringify({ query: queryGetMarketingState }),
+      }
+    );
+
+    const dataGet = await responseGet.json();
+
+    if (!dataGet.data || !dataGet.data.customer) {
+      console.error(`❌ Cliente no encontrado o datos inválidos para ID: ${customerId}`);
+      console.error('📌 Respuesta de Shopify:', dataGet);
+      return;
+    }
+
+    const marketingState = dataGet.data.customer.emailMarketingConsent?.marketingState;
+
+    console.log(`📌 Marketing State obtenido para ${customerId}: ${marketingState}`);
+
+    // Continúa con el resto del procesamiento...
+  } catch (error) {
+    console.error(`❌ Error procesando cliente ${customerId}:`, error);
+  }
+};
+
   
 
 // Función para recorrer todos los clientes
@@ -186,7 +136,7 @@ export const processAllCustomers = async () => {
 
 
 // Guardar un producto en el metafield `favorites`
-export const addFavoriteToCustomer = async (customerId, favorite) => {
+export const addFavoriteToCustomer = async (customerId, productId, variantId, productUrl) => {
   const queryGetFavorites = `
     query {
       customer(id: "gid://shopify/Customer/${customerId}") {
@@ -199,28 +149,72 @@ export const addFavoriteToCustomer = async (customerId, favorite) => {
   `;
 
   try {
-    // Obtener los favoritos actuales
-    const responseGet = await fetchWithRetry(
-      `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
-      {
-        method: 'POST',
+      // Obtener los favoritos actuales
+      const responseGet = await fetchWithRetry(
+          `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
+          {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+                  'X-Shopify-Access-Token': accessToken,
+              },
+              body: JSON.stringify({ query: queryGetFavorites }),
+          }
+      );
+
+      const dataGet = await responseGet.json();
+      let currentFavorites = dataGet.data.customer.metafield
+          ? JSON.parse(dataGet.data.customer.metafield.value || '[]')
+          : [];
+
+      // 📌 Verificar si el producto ya está en favoritos para evitar duplicados
+      if (currentFavorites.some((fav) => fav.productId === productId)) {
+          console.log(`⚠️ El producto ${productId} ya está en favoritos.`);
+          return;
+      }
+
+      // 📌 Obtener la información del producto desde Shopify
+      const productResponse = await fetch(`https://${shopifyDomain}/admin/api/2024-10/products/${productId}.json`, {
+        method: 'GET',
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': accessToken,
         },
-        body: JSON.stringify({ query: queryGetFavorites }),
+      });
+      
+
+      const productData = await productResponse.json();
+      console.log("📌 Respuesta de Shopify para el producto:", JSON.stringify(productData, null, 2)); 
+
+
+
+      if (!productData.product) {
+          console.error(`❌ No se encontró el producto ${productId} en Shopify.`);
+          return;
       }
-    );
 
-    const dataGet = await responseGet.json();
-    let currentFavorites = [];
+      const product = productData.product;
+      const variant = product.variants.find(v => v.id == variantId) || product.variants[0];
 
-    if (dataGet.data.customer.metafield) {
-      currentFavorites = JSON.parse(dataGet.data.customer.metafield.value);
-    }
+      // 📌 Calcular el descuento
+      const discount = variant.compare_at_price && variant.compare_at_price > variant.price
+          ? Math.round((variant.compare_at_price - variant.price) * 100 / variant.compare_at_price)
+          : null;
 
-    // Evitar duplicados
-    if (!currentFavorites.some((item) => item.productId === favorite.productId)) {
+      // 📌 Nuevo objeto con toda la información
+      const favorite = {
+          productId,
+          variantId,
+          productUrl,
+          title: product.title,
+          imageUrl: product.images.length ? product.images[0].src : 'https://via.placeholder.com/150',
+          price: variant.price,
+          compareAtPrice: variant.compare_at_price || null,
+          discount: discount,
+          available: product.available
+      };
+
+      // 📌 Agregar el producto a favoritos
       currentFavorites.push(favorite);
 
       const queryUpdateFavorites = `
@@ -250,30 +244,29 @@ export const addFavoriteToCustomer = async (customerId, favorite) => {
       `;
 
       const responseUpdate = await fetchWithRetry(
-        `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': accessToken,
-          },
-          body: JSON.stringify({ query: queryUpdateFavorites }),
-        }
+          `https://${shopifyDomain}/admin/api/2024-10/graphql.json`,
+          {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+                  'X-Shopify-Access-Token': accessToken,
+              },
+              body: JSON.stringify({ query: queryUpdateFavorites }),
+          }
       );
 
       const dataUpdate = await responseUpdate.json();
       if (dataUpdate.data.customerUpdate.userErrors.length) {
-        console.error('Errores al actualizar el metafield:', dataUpdate.data.customerUpdate.userErrors);
+          console.error('❌ Errores al actualizar el metafield:', dataUpdate.data.customerUpdate.userErrors);
       } else {
-        console.log(`Metafield actualizado para el cliente con ID: ${customerId}`);
+          console.log(`✅ Metafield actualizado con éxito para el cliente ${customerId}`);
       }
-    } else {
-      console.log('El producto ya está en favoritos.');
-    }
   } catch (error) {
-    console.error(`Error actualizando favoritos del cliente ${customerId}:`, error);
+      console.error(`❌ Error actualizando favoritos del cliente ${customerId}:`, error);
   }
 };
+
+
 
 // Leer los favoritos del cliente
 export const getCustomerFavorites = async (customerId) => {
@@ -314,6 +307,3 @@ export const getCustomerFavorites = async (customerId) => {
 
 
 
-
-// Ejecutar el procesamiento
-processAllCustomers();
