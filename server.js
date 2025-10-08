@@ -4,6 +4,10 @@ import dotenv from 'dotenv';
 import { processAllCustomers, addFavoriteToCustomer, getCustomerFavorites } from './updateExistingCustomers.js';
 import path from 'path';
 import cors from 'cors';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 
 
 dotenv.config();
@@ -26,7 +30,8 @@ app.use(cors({ origin: '*' }));
 const deleteExistingWebhooks = async () => {
   const query = `
     query {
-      webhookSubscriptions(first: 100, topics: CUSTOMERS_CREATE) {
+      webhookSubscriptions(first: 100, topics: [CUSTOMERS_CREATE])
+ {
         edges {
           node {
             id
@@ -84,7 +89,11 @@ const deleteExistingWebhooks = async () => {
 const registerWebhook = async () => {
   await deleteExistingWebhooks(); // Primero eliminamos los webhooks antiguos
 
-  const webhookEndpoint = `https://${process.env.VERCEL_URL}/webhooks/customers/create`;
+ const baseUrl = process.env.WEBHOOK_BASE_URL 
+  || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`);
+
+const webhookEndpoint = `${baseUrl}/webhooks/customers/create`;
+
 
   const query = `
     mutation {
@@ -165,6 +174,68 @@ app.post('/favorites/add', async (req, res) => {
   }
 });
 
+app.post('/favorites/remove', async (req, res) => {
+  try {
+    const { customerId, productId, variantId } = req.body;
+    if (!customerId || !productId) {
+      return res.status(400).json({ error: 'Faltan datos requeridos.' });
+    }
+
+    // Leer favoritos actuales
+    const queryGet = `
+      query {
+        customer(id: "gid://shopify/Customer/${customerId}") {
+          metafield(namespace: "custom", key: "favorites") { value }
+        }
+      }
+    `;
+    const getResp = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': accessToken },
+      body: JSON.stringify({ query: queryGet }),
+    });
+    const getJson = await getResp.json();
+    let arr = getJson?.data?.customer?.metafield?.value ? JSON.parse(getJson.data.customer.metafield.value) : [];
+
+    // Filtrar
+    arr = arr.filter(f => !(String(f.productId) === String(productId) && (!variantId || String(f.variantId) === String(variantId))));
+
+    // Guardar
+    const queryUpdate = `
+      mutation {
+        customerUpdate(
+          input: {
+            id: "gid://shopify/Customer/${customerId}"
+            metafields: [{
+              namespace: "custom",
+              key: "favorites",
+              value: "${JSON.stringify(arr).replace(/"/g, '\\"')}",
+              type: "json"
+            }]
+          }
+        ) {
+          userErrors { field message }
+        }
+      }
+    `;
+    const updResp = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': accessToken },
+      body: JSON.stringify({ query: queryUpdate }),
+    });
+    const updJson = await updResp.json();
+
+    if (updJson?.data?.customerUpdate?.userErrors?.length) {
+      return res.status(400).json({ error: 'Shopify error', details: updJson.data.customerUpdate.userErrors });
+    }
+
+    res.status(200).json({ success: true });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Error interno.' });
+  }
+});
 
 
 
