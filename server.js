@@ -1,5 +1,4 @@
 import express from 'express';
-import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { processAllCustomers, addFavoriteToCustomer, getCustomerFavorites } from './updateExistingCustomers.js';
 import path from 'path';
@@ -20,132 +19,38 @@ const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
 
 // Middleware para manejar JSON
 app.use(express.json());
-app.use(cors({ origin: '*' }));
+/*
+ * CORS por lista blanca. Antes era origin: "*": cualquier web podia llamar a
+ * esta API desde el navegador. Los mercados de silbonshop.com van por
+ * subcarpeta, asi que comparten origen. Se amplia sin tocar codigo con
+ * CORS_ALLOWED_ORIGINS (separado por comas). Sin cabecera Origin (webhooks,
+ * curl, servidor a servidor) se deja pasar.
+ */
+const DEFAULT_ORIGINS = ["https://www.silbonshop.com", "https://silbonshop.com"];
+export const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || DEFAULT_ORIGINS.join(","))
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      cb(null, ALLOWED_ORIGINS.includes(origin));
+    },
+  })
+);
 
 
 
 
-// Función para registrar el webhook
-// Función para eliminar webhooks existentes antes de registrar uno nuevo
-const deleteExistingWebhooks = async () => {
-  const query = `
-    query {
-      webhookSubscriptions(first: 100, topics: [CUSTOMERS_CREATE])
- {
-        edges {
-          node {
-            id
-            callbackUrl
-          }
-        }
-      }
-    }
-  `;
-
-  try {
-    const response = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': accessToken,
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    const data = await response.json();
-    const webhooks = data.data.webhookSubscriptions.edges;
-
-    for (const webhook of webhooks) {
-      console.log(`📌 Eliminando webhook con ID: ${webhook.node.id} - URL: ${webhook.node.callbackUrl}`);
-      await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': accessToken,
-        },
-        body: JSON.stringify({
-          query: `
-            mutation {
-              webhookSubscriptionDelete(id: "${webhook.node.id}") {
-                deletedWebhookSubscriptionId
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }
-          `,
-        }),
-      });
-    }
-
-    console.log("✅ Webhooks existentes eliminados correctamente.");
-  } catch (error) {
-    console.error("❌ Error al eliminar webhooks:", error);
-  }
-};
-
-// Modificar la función de registrar webhook para eliminar antes de registrar
-const registerWebhook = async () => {
-  await deleteExistingWebhooks(); // Primero eliminamos los webhooks antiguos
-
- const baseUrl = process.env.WEBHOOK_BASE_URL 
-  || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`);
-
-const webhookEndpoint = `${baseUrl}/webhooks/customers/create`;
-
-
-  const query = `
-    mutation {
-      webhookSubscriptionCreate(
-        topic: CUSTOMERS_CREATE,
-        webhookSubscription: {
-          format: JSON,
-          callbackUrl: "${webhookEndpoint}"
-        }
-      ) {
-        userErrors {
-          field
-          message
-        }
-        webhookSubscription {
-          id
-        }
-      }
-    }
-  `;
-
-  try {
-    const response = await fetch(`https://${shopifyDomain}/admin/api/2024-10/graphql.json`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': accessToken,
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    const data = await response.json();
-    console.log('📌 Respuesta de registro de webhook:', JSON.stringify(data, null, 2));
-
-    if (data.errors || data.data.webhookSubscriptionCreate.userErrors.length) {
-      console.error('❌ Error al registrar webhook:', JSON.stringify(data.data.webhookSubscriptionCreate.userErrors, null, 2));
-    } else {
-      console.log('✅ Webhook registrado con éxito:', data.data.webhookSubscriptionCreate.webhookSubscription.id);
-    }
-  } catch (error) {
-    console.error('❌ Error al registrar webhook:', error);
-  }
-};
-
-// Ejecutar el registro del webhook
-registerWebhook();
+// El registro del webhook customers/create ya no se hace al arrancar (en Lambda
+// correria en cada arranque en frio y borraria/recrearia la suscripcion cada
+// vez). Se ejecuta a mano una vez: node scripts/register-webhook.mjs <URL>.
 
 
 // Ruta para añadir un producto a favoritos
 app.post('/favorites/add', async (req, res) => {
-  console.log("📌 Token usado:", accessToken);
-
   console.log("📌 Recibido en /favorites/add:", req.body);
 
   let { customerId, productId, variantId, productUrl } = req.body;
@@ -163,10 +68,10 @@ app.post('/favorites/add', async (req, res) => {
 
   console.log(`📌 Procesando favorito: Producto ID: ${productId}, Variant ID: ${variantId}`);
 
-  const favorite = { productId, variantId, productUrl };
-
   try {
-    await addFavoriteToCustomer(customerId, favorite);
+    // addFavoriteToCustomer(customerId, productId, variantId, productUrl): antes se le
+    // pasaba un objeto como productId y la petición a /products/[object Object].json fallaba.
+    await addFavoriteToCustomer(customerId, productId, variantId, productUrl);
     res.status(200).json({ message: 'Producto añadido a favoritos.' });
   } catch (error) {
     console.error('❌ Error añadiendo producto a favoritos:', error);
@@ -310,7 +215,11 @@ app.post('/webhooks/customers/create', async (req, res) => {
 app.use((req, res) => {
   res.status(404).send('Ruta no encontrada. Verifica la URL.');
 });
-// Inicia el servidor
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Inicia el servidor solo fuera de Lambda (server/lambda.mjs importa la app).
+if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+export { app };

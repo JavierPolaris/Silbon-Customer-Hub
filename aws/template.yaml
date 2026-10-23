@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  API de favoritos del área de cliente de Silbon (metafield custom.favorites).
+  Una Lambda con la app de Express detrás de un API Gateway HTTP. Se despliega
+  con aws/deploy.ps1 usando solo el AWS CLI, como el resto de pilas de Silbon.
+
+Parameters:
+  SecretsPrefix:
+    Type: String
+    Default: /silbon/favoritos
+    Description: >
+      Prefijo de los SecureString en SSM Parameter Store (SHOPIFY_ACCESS_TOKEN).
+      Se crean fuera de la pila; deploy.ps1 comprueba que existan.
+    AllowedPattern: '^/[a-zA-Z0-9/_.-]+[^/]$'
+
+  ShopifyDomain:
+    Type: String
+    Description: Dominio myshopify de la tienda (SHOPIFY_DOMAIN). No secreto.
+
+  CorsAllowedOrigins:
+    Type: String
+    Default: 'https://www.silbonshop.com,https://silbonshop.com'
+    Description: Lista blanca de orígenes del navegador, separados por comas.
+
+  DomainName:
+    Type: String
+    Default: ''
+    Description: >
+      Dominio propio opcional, p. ej. favoritos.silbon.es. Vacío = solo la URL
+      de execute-api. Si se indica hacen falta CertificateArn y HostedZoneId.
+    AllowedPattern: '^$|^[a-z0-9.-]+\.silbon\.es$'
+
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: >
+      Certificado ACM para DomainName. Tiene que estar en la MISMA región que
+      la pila (API Gateway regional), no en us-east-1.
+    AllowedPattern: '^$|^arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$'
+
+  HostedZoneId:
+    Type: String
+    Default: ZDE8KK068AVPG
+    Description: Zona de silbon.es en Route53, donde se crea el alias del dominio.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Rol de la función: logs y lectura de su secreto.
+  # ---------------------------------------------------------------------------
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-favoritos-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SecretsPrefix}/*'
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'ssm.${AWS::Region}.amazonaws.com'
+
+  # ---------------------------------------------------------------------------
+  # La Lambda: toda la app de Express, todas las rutas.
+  # ---------------------------------------------------------------------------
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-api'
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ApiLogGroup
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-api'
+      Runtime: nodejs22.x
+      Handler: server/lambda.handler
+      Role: !GetAtt FunctionRole.Arn
+      # /favorites/add hace hasta 3 llamadas a Shopify (con reintentos); el
+      # límite del API Gateway es 29 s.
+      Timeout: 25
+      MemorySize: 512
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          TZ: Europe/Madrid
+          SECRETS_SSM_PREFIX: !Ref SecretsPrefix
+          SHOPIFY_DOMAIN: !Ref ShopifyDomain
+          CORS_ALLOWED_ORIGINS: !Ref CorsAllowedOrigins
+          NODE_OPTIONS: --enable-source-maps
+      Code:
+        # Placeholder: el código real lo sube aws/deploy.ps1 con
+        # `aws lambda update-function-code`. CloudFormation no vuelve a tocar
+        # este campo mientras el texto no cambie.
+        ZipFile: |
+          export const handler = async () => ({
+            statusCode: 503,
+            body: '{"error":"not_deployed_yet"}',
+          });
+
+  # ---------------------------------------------------------------------------
+  # API Gateway HTTP API. CORS lo gestiona la propia app (lista blanca), así
+  # que aquí no se configura.
+  # ---------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      ProtocolType: HTTP
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 29000
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: $default
+      Target: !Sub 'integrations/${HttpApiIntegration}'
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+
+  HttpApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ApiFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+
+  # ---------------------------------------------------------------------------
+  # Dominio propio (opcional): certificado regional, mapeo al stage y alias
+  # en Route53. Así el tema y el webhook de Shopify no cambian de URL si la
+  # pila se recrea.
+  # ---------------------------------------------------------------------------
+  ApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasDomain
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ApiDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasDomain
+    DependsOn: HttpApiStage
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiDomain
+      Stage: $default
+
+  DnsRecordA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiDomain.RegionalHostedZoneId
+
+  DnsRecordAAAA:
+    Type: AWS::Route53::RecordSet
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        DNSName: !GetAtt ApiDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiDomain.RegionalHostedZoneId
+
+Outputs:
+  ApiFunctionName:
+    Value: !Ref ApiFunction
+
+  ApiUrl:
+    Description: URL base del API Gateway (siempre válida, con o sin dominio propio)
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+
+  PublicUrl:
+    Description: URL que deben usar el tema (theme.js, main-customers-account.liquid) y el webhook customers/create
+    Value: !If
+      - HasDomain
+      - !Sub 'https://${DomainName}'
+      - !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
